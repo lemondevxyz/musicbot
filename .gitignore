@@ -1,0 +1,6 @@
+# Ignore the audio files made by the the bot
+*.dca
+*.mp3
+
+# Ignore the configuration that includes sensitive data
+config.yaml
