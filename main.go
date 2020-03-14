@@ -106,8 +106,6 @@ func main() {
 		log.Fatalf("Unable to unmarshal config, error: %v", err)
 	}
 
-	log.Fatalln(config)
-
 	input, err = os.Create(audioFilename)
 	if err != nil {
 		log.Fatalf("Cannot create input file, error: %v", err)

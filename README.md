@@ -33,6 +33,7 @@ After a song is done playing, the files are then emptied. The reason we don't de
 - golang(build time)
 
 ## Building
+Current this music bot supports only linux, if you are running windows or mac os it won't work for you. This is due to using the [gopus](github.com/layeh/gopus).
 ```
 go get -u # Get all the golang dependencies
 go build # Build the binary
