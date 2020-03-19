@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"layeh.com/gopus"
+	"gopkg.in/hraban/opus.v2"
 )
 
 var (
@@ -49,10 +49,10 @@ var (
 
 	// maxBytes is a calculated value of the largest possible size that an
 	// opus frame could be.
-	maxBytes = (audioFrameSize * audioChannels)
+	originalMaxBytes = (audioFrameSize * audioChannels)
 
 	// opusEncoder holds an instance of an gopus Encoder
-	opusEncoder *gopus.Encoder
+	opusEncoder *opus.Encoder
 
 	// waitGroup is used to wait until all goroutines have finished.
 	waitGroup sync.WaitGroup
@@ -63,10 +63,10 @@ var (
 	volume = float64(1.0)
 
 	// The Rate at which the audio file is able to read.
-	// playbackspeed = 100
+	playbackspeed = 100
 
-	// Send channel is used to measure when queueindex has been changed
-	sendchannel = getchan()
+	// playingAudio is used to determine if currently a song is playing or not. It starts from the goroutine in main()
+	playingAudio bool
 )
 
 func convert() error {
@@ -83,86 +83,44 @@ func convert() error {
 	return ff.Run()
 }
 
-/*
-func read() {
-
-	var err error
-
-	waitGroup.Add(1)
-
-	defer func() {
-		close(encodeChan)
-		waitGroup.Done()
-	}()
-
-	f, err := os.Open("sample.opus")
-	if err != nil {
-		return
-	}
-
-	// Create a 16KB input buffer
-	filebuffer := bufio.NewReaderSize(f, 16384)
-
-	// Loop over the stdin input and pass the data to the encoder.
-	for {
-
-		buf := make([]int16, maxBytes)
-
-		err = binary.Read(filebuffer, binary.LittleEndian, &buf)
-		if err == io.EOF {
-			// Okay! There's nothing left, time to quit.
-			return
-		}
-
-		if err == io.ErrUnexpectedEOF {
-			// Well there's just a tiny bit left, lets encode it, then quit.
-			encodeChan <- buf
-			return
-		}
-
-		if err != nil {
-			// Oh no, something went wrong!
-			log.Println("error reading from file buffer", err)
-			return
-		}
-
-		for k := range buf {
-			buf[k] = int16(math.Floor(float64(buf[k]) * volume)) // Should work +/- values
-		}
-
-		// write pcm data to the encodeChan
-		encodeChan <- buf
-	}
-}
-*/
-
 // send reads from the converted opus file, then sends it to the voice connection
 func send() {
 
-	if err := convert(); err != nil {
-		log.Println(err)
+	err := convert()
+	if err != nil {
+		log.Printf("ffmpeg encountered an error: %v", err)
 		return
 	}
 
 	qi := queueindex
-
 	defer func(qi int) {
-
 		if vc != nil {
 			vc.Speaking(false)
 		}
 
+		log.Println("ran defer")
+		playingAudio = false
+
+		// If the user didn't skip the song
 		if qi == queueindex {
 
+			// If shuffle is off and loop is not set to loop song
 			if shuffle == false && loop != loopSong {
-				if len(queue) < queueindex && loop != loopSong {
+				// If the amount of songs exceeds the current song index, i.e
+				// amount of songs: 5, current song: 4, queueindex would become 5
+				log.Println(len(queue), queueindex)
+				if len(queue) > queueindex {
 					setqueueindex(queueindex + 1)
 				}
 
+				// If the amount of songs is equal to the current song index, i.e
+				// amount of songs: 5, current song: 5, queueindex would become 0. starting over again.
 				if queueindex == len(queue) && loop == loopQueue {
 					setqueueindex(0)
 				}
+				// If shuffle is off and loop is not set to loop song
 			} else if shuffle == true && loop != loopSong {
+				// Array to hold all the songs' index that are left
 				arr := []int{}
 				for i := 0; i < len(queue); i++ {
 					if i == queueindex {
@@ -172,12 +130,17 @@ func send() {
 					arr = append(arr, i)
 				}
 
+				// Setting up the seed for unpredictable results
 				rand.Seed(time.Now().UnixNano())
+				// If there are more than 1 song in the array
 				if len(arr) > 1 {
+					// Set queue index to a random index that is equal to len(arr)-1
+					// this will give us a random song index that is not the song that has been played before.
 					setqueueindex(arr[rand.Intn(len(arr)-1)])
 				}
 			}
 
+			// If loop is set to loop song then replay it
 			if loop == loopSong {
 				setqueueindex(qi)
 			}
@@ -190,40 +153,39 @@ func send() {
 		vc.Speaking(true)
 	}
 
-	// Create a 16KB input buffer, old: 16384 - new:
+	// Create a 16KB input buffer
 	filebuffer := bufio.NewReaderSize(output, 16384)
-	var err error
 
-	for {
-		select {
-		case <-sendchannel:
-			return
-		default:
+	for vc != nil {
+		if queueindex != qi {
+			break
+		} else {
 			if pause {
 				continue
 			}
 
-			buf := make([]int16, maxBytes)
+			buf := make([]int16, originalMaxBytes)
 
 			err = binary.Read(filebuffer, binary.LittleEndian, &buf)
 			if err != nil {
 				// Okay! There's nothing left, time to quit.
-				return
+				break
 			}
 
 			for k := range buf {
 				buf[k] = int16(math.Floor(float64(buf[k]) * volume)) // Should work +/- values
 			}
 
-			opus, err := opusEncoder.Encode(buf, audioFrameSize, maxBytes)
-			if err == nil {
-				if vc != nil {
-					vc.OpusSend <- opus
-				}
+			opus := make([]byte, originalMaxBytes)
+
+			num, err := opusEncoder.Encode(buf, opus)
+			if err == nil && num > 0 {
+				vc.OpusSend <- opus[:num]
+			} else {
+				break
 			}
-
 		}
-
 	}
 
+	log.Println("end")
 }

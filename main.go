@@ -20,12 +20,13 @@ import (
 	"github.com/spf13/viper"
 	"google.golang.org/api/googleapi/transport"
 	"google.golang.org/api/youtube/v3"
-	"layeh.com/gopus"
+	"gopkg.in/hraban/opus.v2"
 )
 
 type commandCallback func(s *discordgo.Session, m *commandParameter)
 type commandParameter struct {
 	*discordgo.MessageCreate
+	cmd   *command
 	Split []string
 }
 
@@ -34,23 +35,161 @@ type videoInfo struct {
 	Name string
 }
 
+type command struct {
+	alias    []string
+	help     string
+	messages map[string]string
+	callback commandCallback
+}
+
 var sesh *discordgo.Session
-var commands = map[string]commandCallback{
-	"play":       cmdPlay,  // Add a song to the queue
-	"ping":       cmdPing,  // Send a ping back at the user. used to check if message handler is working
-	"queue":      cmdQueue, // Lists out the current queue
-	"skip":       cmdSkip,  // Skips the current song
-	"loop":       cmdLoop,  // Set the cmdLoop( to off, current song, or current queue
-	"join":       cmdJoin,
-	"volume":     cmdVolume,
-	"pause":      cmdPause,
-	"resume":     cmdResume,
-	"playsample": cmdPlaySample,
-	"setname":    cmdSetName,
-	"setavatar":  cmdSetAvatar,
-	"shuffle":    cmdShuffle,
-	"clear":      cmdClear,
-	//"speed":      cmdSpeed,
+
+var commands []*command
+
+func init() {
+	commands = []*command{
+		&command{
+			alias: []string{"play", "pl"},
+			help:  "Adds a song to the queue",
+			messages: map[string]string{
+				"success": "Added **{{title}}** to the queue!",
+				"empty":   "No videos found",
+				"param":   "Please provide a serach query, or a link to a youtube video",
+			},
+			callback: cmdPlay,
+		},
+
+		&command{
+			alias: []string{"queue", "q", "playlist"},
+			help:  "Sends a message containing the songs in the current",
+			messages: map[string]string{
+				"start": "```",
+				"loop":  "{{index}}. {{title}} | {{name}}",
+				"end":   "```",
+				"empty": "The queue is empty",
+			},
+			callback: cmdQueue,
+		},
+
+		&command{
+			alias:    []string{"skip", "sk"},
+			help:     "Skips the current song and plays the next song if there is one",
+			messages: map[string]string{},
+			callback: cmdSkip,
+		},
+
+		&command{
+			alias: []string{"loop", "l"},
+			help:  "Sets the loop mode to one of three: off, current song, current queue",
+			messages: map[string]string{
+				"off":   "Current loop is set to **off**",
+				"song":  "Current loop is set to **current song**",
+				"queue": "Current loop is set to **current queue**",
+			},
+			callback: cmdLoop,
+		},
+
+		&command{
+			alias: []string{"join", "j"},
+			help:  "Joins the current voice channel",
+			messages: map[string]string{
+				"already_in": "I am already in a voice channel",
+				"no_channel": "You need to be in a voice channel",
+			},
+			callback: cmdJoin,
+		},
+
+		&command{
+			alias: []string{"volume", "vol", "v"},
+			help:  "Displays or sets the volume, acceptable values are from 0 to 100",
+			messages: map[string]string{
+				"volume": "Volume is set too **{{volume}}**",
+			},
+			callback: cmdVolume,
+		},
+
+		&command{
+			alias: []string{"pause", "pa"},
+			help:  "Pauses the current song",
+			messages: map[string]string{
+				"pause": "Paused the current song",
+			},
+			callback: cmdPause,
+		},
+
+		&command{
+			alias: []string{"resume", "re"},
+			help:  "Resumes the current song",
+			messages: map[string]string{
+				"resume": "Resumed the current song",
+			},
+			callback: cmdResume,
+		},
+
+		&command{
+			alias: []string{"setname", "sn"},
+			help:  "Sets the bot's name",
+			messages: map[string]string{
+				"setname":   "Change the bot's name from **{{old}}** to **{{new}}**",
+				"ratelimit": "You're changing the avatar too fast, Try again later.",
+				"param":     "Please provide a name for me to change",
+			},
+			callback: cmdSetName,
+		},
+
+		&command{
+			alias: []string{"setavatar", "sa"},
+			help:  "Sets the bot's avatar",
+			messages: map[string]string{
+				"setavatar": "Successfully changed the bot's profile picture",
+				"param":     "Please provide an image as attachment, or a url of an image",
+			},
+			callback: cmdSetAvatar,
+		},
+
+		&command{
+			alias: []string{"shuffle", "sh"},
+			help:  "Enables or Disables shuffle mode",
+			messages: map[string]string{
+				"on":  "Shuffle is now **on**",
+				"off": "Shuffle is now **off**",
+			},
+			callback: cmdShuffle,
+		},
+
+		&command{
+			alias: []string{"help", "h"},
+			help:  "Send a message explaining every command",
+			messages: map[string]string{
+				"start":      "",
+				"startalias": "[",
+				"cmd":        "**{{name}}** *{{alias}}*\n{{help}}\n", // name is the first alias
+				"endalias":   "]",
+				"end":        "",
+			},
+			callback: cmdHelp,
+		},
+
+		&command{
+			alias: []string{"clear", "c"},
+			help:  "Clears the queue",
+			messages: map[string]string{
+				"start": "```",
+				"clear": "Successfully cleared the queue",
+				"end":   "```",
+			},
+			callback: cmdClear,
+		},
+
+		&command{
+			alias: []string{"leave", "l"},
+			help:  "Leaves the voice channel",
+			messages: map[string]string{
+				"novoice": "The bot is not currently inside a voice channel",
+			},
+			callback: cmdLeave,
+		},
+	}
 }
 
 var yt *youtube.Service
@@ -58,7 +197,6 @@ var vc *discordgo.VoiceConnection
 
 var queue = []*videoInfo{}
 var queueindex = -1 // This is the original queue index
-var listeners []chan int
 
 var loop = loopOff
 var shuffle = false
@@ -84,10 +222,6 @@ var pause = false
 
 func main() {
 
-	go func() {
-		<-sendchannel
-	}()
-
 	viper.SetConfigName("config")
 	viper.AddConfigPath(".")
 	viper.SetDefault("botToken", "")
@@ -96,16 +230,21 @@ func main() {
 
 	var err error
 
+	// Initiate viper for our config
 	err = viper.ReadInConfig()
 	if err != nil {
 		log.Fatalf("Cannot read config, error: %v", err)
 	}
 
+	// Unmarshal the config
 	err = viper.Unmarshal(&config)
 	if err != nil {
 		log.Fatalf("Unable to unmarshal config, error: %v", err)
 	}
 
+	// Create the files for us to store the input and output.
+	// Input is the original file from youtube
+	// Output is the ffmpeg-modified file
 	input, err = os.Create(audioFilename)
 	if err != nil {
 		log.Fatalf("Cannot create input file, error: %v", err)
@@ -116,40 +255,43 @@ func main() {
 		log.Fatalf("Cannot create output file, error: %v", err)
 	}
 
+	// Cleanup is used to truncate the files
 	cleanup()
 	defer cleanup()
 
-	opusEncoder, err = gopus.NewEncoder(audioFrameRate, audioChannels, gopus.Audio)
+	// OpusEncoder is used to encode the Output file to discord's own DCA format
+	opusEncoder, err = opus.NewEncoder(audioFrameRate, audioChannels, opus.AppAudio)
 	if err != nil {
 		log.Fatalf("An error occured with initializing the OpusEncoder, error: %v", err)
 	}
 
 	opusEncoder.SetBitrate(audioBitrate * 1000)
-	opusEncoder.SetApplication(gopus.Audio)
 
 	ytdlclient := ytdl.DefaultClient
 
+	// This goroutine manages the newly-added songs, whenever a new song is added it calls
+	// send() to stream it to discord, and then cleans the file for another song to be played.
+	// If there are any problems with the queue, most likely it's from this function alone.
 	go func() {
 
-		queuechannel := getchan()
-
 		for {
-			<-queuechannel
-			if pause {
-				pause = false
-			}
+			if len(queue) > queueindex && queueindex >= 0 {
 
-			if queueindex < len(queue) {
+				if pause {
+					pause = false
+				}
+
 				vid := queue[queueindex]
+				playingAudio = true
 
 				ytdlclient.Download(vid.Base, vid.Base.Formats[0], input)
-				time.Sleep(time.Millisecond * 1000)
+				time.Sleep(time.Second)
 
 				send()
 				cleanup()
 			}
 
-			time.Sleep(time.Millisecond * 250)
+			time.Sleep(time.Second)
 		}
 
 	}()
@@ -178,7 +320,6 @@ func main() {
 		log.Fatalf("Error creating new YouTube client: %v", err)
 	}
 
-	log.Printf("BOT TOKEN: '%v'", config.BotToken)
 	log.Println("Session created successfully")
 	sig := make(chan os.Signal)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, os.Kill, syscall.SIGINT)
@@ -198,37 +339,35 @@ func cleanup() {
 	output.Seek(0, 0)
 
 }
-
-func cleanlistener(listener chan int) {
-	var index = -1
-	for k, v := range listeners {
-		if v == listener {
-			index = k
-			break
-		}
-	}
-
-	if index >= 0 {
-		listeners[len(listeners)-1], listeners[index] = listeners[index], listeners[len(listeners)-1]
-		listeners = listeners[:len(listeners)-1]
-	}
-
-}
-
 func setqueueindex(v int) {
-	if len(queue) > v {
+	if len(queue) >= v {
 		queueindex = v
-		for _, ch := range listeners {
-			ch <- v
-		}
 	}
 }
 
-func getchan() chan int {
-	listener := make(chan int, 100)
+func replacestringwithtrackinfo(str string, track *videoInfo) string {
 
-	listeners = append(listeners, listener)
-	return listener
+	base := track.Base
+	d := base.Duration.Round(time.Second)
+	m := int(math.Floor(d.Minutes()))
+	s := int(d.Seconds()) % 60
+
+	duration := fmt.Sprintf("%02d:%02d", m, s)
+
+	replaces := strings.NewReplacer(
+		"{{title}}", base.Title,
+		"{{id}}", base.ID,
+		"{{description}}", base.Description,
+		"{{datepublished}}", base.DatePublished.Format("2006/01/02"),
+		"{{uploader}}", base.Uploader,
+		"{{song}}", base.Song,
+		"{{artist}}", base.Artist,
+		"{{album}}", base.Album,
+		"{{writers}}", base.Writers,
+		"{{duration}}", duration,
+		"{{name}}", track.Name)
+
+	return replaces.Replace(str)
 }
 
 func messageHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -246,13 +385,26 @@ func messageHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 	split := strings.Split(m.Content, " ")
 
 	if len(split) > 0 {
-		cp := &commandParameter{
-			m,
-			split,
+		var cmd *command
+		for _, v := range commands {
+			for _, alias := range v.alias {
+				if alias == split[0] {
+					cmd = v
+					break
+				}
+			}
 		}
 
-		if fn, ok := commands[split[0]]; ok {
-			fn(s, cp)
+		if cmd != nil {
+			cp := &commandParameter{
+				m,
+				cmd,
+				split,
+			}
+
+			if cmd.callback != nil {
+				go cmd.callback(s, cp)
+			}
 		}
 	}
 
@@ -276,7 +428,8 @@ func cmdPlay(s *discordgo.Session, m *commandParameter) {
 
 			res, err := call.Do()
 			if err != nil {
-				s.ChannelMessageSend(m.ChannelID, "An error error occured with searching for the video, please consult @toms#1441")
+				return
+				//s.ChannelMessageSend(m.ChannelID, "An error error occured with searching for the video, please consult @toms#1441")
 			}
 
 			if len(res.Items) > 0 {
@@ -287,62 +440,103 @@ func cmdPlay(s *discordgo.Session, m *commandParameter) {
 		if len(yturl) > 0 {
 			vid, err := ytdl.GetVideoInfo(yturl)
 			if err == nil {
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Added **%s** to the queue!", vid.Title))
-				queue = append(queue, &videoInfo{
+
+				newvid := &videoInfo{
 					Base: vid,
 					Name: "@" + m.Author.String(),
-				})
-
-				if queueindex == -1 {
-					setqueueindex(0)
 				}
+
+				oldlen := len(queue)
+				queue = append(queue, newvid)
+
+				s.ChannelMessageSend(m.ChannelID, replacestringwithtrackinfo(m.cmd.messages["success"], newvid))
 
 				if vc == nil {
 					cmdJoin(s, m)
 				}
+
+				// If we have a clear queue, set queueindex to 0 to initiate the first song.
+				if queueindex < 0 && oldlen == 0 {
+					setqueueindex(0)
+				}
 			}
 		} else {
-			s.ChannelMessageSend(m.ChannelID, "No videos found!")
+			s.ChannelMessageSend(m.ChannelID, m.cmd.messages["empty"])
 		}
 	} else {
 		if pause {
 			cmdResume(s, m)
 		} else {
-			s.ChannelMessageSend(m.ChannelID, "Please provide a search query, or a youtube video")
+			setqueueindex(queueindex)
 		}
 	}
 }
 
 func cmdQueue(s *discordgo.Session, m *commandParameter) {
 
-	str := "```"
-	number := int(len(queue)/10) + 1
+	var str string
+	if len(queue) > 0 {
+		str = m.cmd.messages["start"]
 
-	for k, v := range queue {
-		d := v.Base.Duration.Round(time.Second)
-		m := int(math.Floor(d.Minutes()))
-		s := int(d.Seconds()) % 60
+		var i = queueindex
+		var start, end int
 
-		duration := fmt.Sprintf("%02d:%02d", m, s)
+		if len(queue) > i+25 || len(queue) == i+25 {
+			start = i
+			end = i + 25
+		} else if len(queue) < i+25 {
+			start = i - (i + 25 - len(queue))
+			end = len(queue)
+		}
 
-		format := "%0" + strconv.Itoa(number) + "d. %s [%s] | %s\n"
-		str += fmt.Sprintf(format, k+1, v.Base.Title, duration, v.Name)
+		if start < 0 {
+			start = 0
+		}
+
+		/*
+			Three cases:
+			First case:
+				50 songs and current song is 15.
+				so we need to display starting from 15 to 40.
+			Second case:
+				50 songs and current song is 35.
+				so we need to start displaying from 25 to 50.
+			Third case(runs first condition):
+				50 seconds and current song is 25
+				so we need to start from the 25 to 50.
+		*/
+
+		for i = start; i < end; i++ {
+			if len(queue) > i {
+				v := queue[i]
+
+				if v != nil {
+
+					newstr := replacestringwithtrackinfo(m.cmd.messages["loop"], v)
+					newstr = strings.ReplaceAll(newstr, "{{index}}", fmt.Sprintf("%02d", i+1))
+
+					str += newstr
+
+					if i+1 != len(queue) {
+						str += "\n"
+					}
+				}
+			}
+		}
+
+		str += m.cmd.messages["end"]
+	} else {
+		str = m.cmd.messages["empty"]
 	}
 
-	str += "```"
-
 	s.ChannelMessageSend(m.ChannelID, str)
-}
-
-func cmdPing(s *discordgo.Session, m *commandParameter) {
-	s.ChannelMessageSend(m.ChannelID, "ok")
 }
 
 func cmdSkip(s *discordgo.Session, m *commandParameter) {
 	pause = false
 	if queueindex >= 0 {
 		i := queueindex + 1
-		if i < len(queue) {
+		if i <= len(queue) {
 			setqueueindex(i)
 		}
 	}
@@ -365,21 +559,25 @@ func cmdLoop(s *discordgo.Session, m *commandParameter) {
 		}
 	}
 
-	str := "cmdLoop( is set to **"
+	str := ""
 	if loop == loopOff {
-		str += "off"
+		str = m.cmd.messages["off"]
 	} else if loop == loopSong {
-		str += "current song"
+		str = m.cmd.messages["song"]
 	} else if loop == loopQueue {
-		str += "current queue"
+		str = m.cmd.messages["queue"]
 	}
-
-	str += "**"
 
 	s.ChannelMessageSend(m.ChannelID, str)
 }
 
 func cmdJoin(s *discordgo.Session, m *commandParameter) {
+
+	if vc != nil {
+		s.ChannelMessageSend(m.ChannelID, m.cmd.messages["already_in"])
+
+	}
+
 	channel, err := s.State.Channel(m.ChannelID)
 	if err != nil {
 		return
@@ -397,7 +595,7 @@ func cmdJoin(s *discordgo.Session, m *commandParameter) {
 		}
 	}
 
-	s.ChannelMessageSend(m.ChannelID, "You need to be in a voice channel")
+	s.ChannelMessageSend(m.ChannelID, m.cmd.messages["no_voice"])
 }
 
 func cmdPlaySample(s *discordgo.Session, m *commandParameter) {
@@ -422,19 +620,19 @@ func cmdVolume(s *discordgo.Session, m *commandParameter) {
 		if err == nil {
 			if vol <= 100 && vol >= 0 {
 				volume = float64(vol) / 100
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Volume set to **%02d**", vol))
-			} else {
-				s.ChannelMessageSend(m.ChannelID, "Provided volume is less than 0 or more than 100")
 			}
 		}
-	} else {
-		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Current volume is set to **%02d**", int(volume*100)))
 	}
+
+	str := m.cmd.messages["volume"]
+	str = strings.Replace(str, "{{volume}}", fmt.Sprintf("%02d", int(volume*100)), 0)
+
+	s.ChannelMessageSend(m.ChannelID, str)
 }
 
 func cmdPause(s *discordgo.Session, m *commandParameter) {
 	if !pause {
-		s.ChannelMessageSend(m.ChannelID, "Paused the current song")
+		s.ChannelMessageSend(m.ChannelID, m.cmd.messages["pause"])
 	}
 
 	pause = true
@@ -442,7 +640,7 @@ func cmdPause(s *discordgo.Session, m *commandParameter) {
 
 func cmdResume(s *discordgo.Session, m *commandParameter) {
 	if pause {
-		s.ChannelMessageSend(m.ChannelID, "Resume the current song")
+		s.ChannelMessageSend(m.ChannelID, m.cmd.messages["resume"])
 	}
 
 	pause = false
@@ -460,12 +658,12 @@ func cmdSetName(s *discordgo.Session, m *commandParameter) {
 
 		_, err := s.UserUpdate("", "", name, "", "")
 		if err == nil {
-			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Successfully changed the name from **%s** to **%s**", s.State.User.Username, name))
+			s.ChannelMessageSend(m.ChannelID, m.cmd.messages["setname"])
 		} else {
-			s.ChannelMessageSend(m.ChannelID, "You're changing the avatar too fast, Try again later.")
+			s.ChannelMessageSend(m.ChannelID, m.cmd.messages["ratelimit"])
 		}
 	} else {
-		s.ChannelMessageSend(m.ChannelID, "Please provide a name for me to change")
+		s.ChannelMessageSend(m.ChannelID, m.cmd.messages["param"])
 	}
 
 }
@@ -482,7 +680,7 @@ func cmdSetAvatar(s *discordgo.Session, m *commandParameter) {
 			if err != nil {
 				avatar = ""
 
-				s.ChannelMessageSend(m.ChannelID, "Please provide an image with the message, or a link to an image")
+				s.ChannelMessageSend(m.ChannelID, m.cmd.messages["param"])
 
 				return
 			}
@@ -501,7 +699,7 @@ func cmdSetAvatar(s *discordgo.Session, m *commandParameter) {
 				avatar := fmt.Sprintf("data:%s;base64,%s", contentType, base64img)
 				s.UserUpdate("", "", "", avatar, "")
 
-				s.ChannelMessageSend(m.ChannelID, "Successfully updated the avatar")
+				s.ChannelMessageSend(m.ChannelID, m.cmd.messages["setavatar"])
 			}
 		}
 	}
@@ -510,9 +708,9 @@ func cmdSetAvatar(s *discordgo.Session, m *commandParameter) {
 func cmdShuffle(s *discordgo.Session, m *commandParameter) {
 	shuffle = !shuffle
 	if shuffle {
-		s.ChannelMessageSend(m.ChannelID, "Shuffle is now **enabled**")
+		s.ChannelMessageSend(m.ChannelID, m.cmd.messages["on"])
 	} else {
-		s.ChannelMessageSend(m.ChannelID, "Shuffle is now **disabled**")
+		s.ChannelMessageSend(m.ChannelID, m.cmd.messages["off"])
 	}
 
 }
@@ -521,21 +719,56 @@ func cmdClear(s *discordgo.Session, m *commandParameter) {
 	queue = []*videoInfo{}
 	setqueueindex(-1)
 
-	s.ChannelMessageSend(m.ChannelID, "Successfully cleared the queue")
+	s.ChannelMessageSend(m.ChannelID, m.cmd.messages["clear"])
 }
 
-/*func cmdSpeed(s *discordgo.Session, m *commandParameter) {
-	if len(m.Split) >= 2 {
-		speed, err := strconv.ParseFloat(m.Split[1], 32)
-		if err == nil {
-			if speed <= 2.0 && speed >= 0.25 {
-				playbackspeed = int(math.Floor(speed * 100))
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Playback Speed set to **%02d**", playbackspeed))
-			} else {
-				s.ChannelMessageSend(m.ChannelID, "Provided playback speed is less than 0.25 or more than 2")
+func cmdHelp(s *discordgo.Session, m *commandParameter) {
+
+	str := m.cmd.messages["start"]
+
+	for _, v := range commands {
+
+		name := v.alias[0]
+		name = strings.Title(name)
+
+		alias := m.cmd.messages["startalias"]
+		for k, val := range v.alias {
+			alias += val
+			if k+1 < len(v.alias) {
+				alias += ","
 			}
 		}
-	} else {
-		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Current playback speed is set to **%02d**", playbackspeed))
+		alias += m.cmd.messages["endalias"]
+
+		format := m.cmd.messages["cmd"]
+
+		format = strings.ReplaceAll(format, "{{alias}}", alias)
+		format = strings.ReplaceAll(format, "{{name}}", name)
+		format = strings.ReplaceAll(format, "{{help}}", v.help)
+
+		str += format
 	}
-}*/
+
+	str += m.cmd.messages["end"]
+
+	chn, err := s.UserChannelCreate(m.Author.ID)
+	if err == nil {
+		s.ChannelMessageSend(chn.ID, str)
+	}
+}
+
+func cmdLeave(s *discordgo.Session, m *commandParameter) {
+	if vc != nil {
+
+		cmdSkip(s, m)
+
+		go func() {
+			time.Sleep(time.Millisecond * 50)
+			vc.Disconnect()
+			vc = nil
+		}()
+
+	} else {
+		s.ChannelMessageSend(m.ChannelID, m.cmd.messages["novoice"])
+	}
+}
