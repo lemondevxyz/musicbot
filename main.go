@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"math"
@@ -16,7 +17,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/rylio/ytdl"
+	ytdl "github.com/kkdai/youtube/v2"
 	"github.com/spf13/viper"
 	"google.golang.org/api/googleapi/transport"
 	"google.golang.org/api/youtube/v3"
@@ -31,7 +32,7 @@ type commandParameter struct {
 }
 
 type videoInfo struct {
-	Base *ytdl.VideoInfo
+	Base *ytdl.Video
 	Name string
 }
 
@@ -45,6 +46,9 @@ type command struct {
 var sesh *discordgo.Session
 
 var commands []*command
+var ytcl = ytdl.Client{
+	Debug: false,
+}
 
 func init() {
 	commands = []*command{
@@ -103,7 +107,7 @@ func init() {
 			alias: []string{"volume", "vol", "v"},
 			help:  "Displays or sets the volume, acceptable values are from 0 to 100",
 			messages: map[string]string{
-				"volume": "Volume is set too **{{volume}}**",
+				"volume": "Volume is set to **{{volume}}**",
 			},
 			callback: cmdVolume,
 		},
@@ -242,14 +246,10 @@ func main() {
 		log.Fatalf("Unable to unmarshal config, error: %v", err)
 	}
 
-	// Create the files for us to store the input and output.
-	// Input is the original file from youtube
-	// Output is the ffmpeg-modified file
 	input, err = os.Create(audioFilename)
 	if err != nil {
-		log.Fatalf("Cannot create input file, error: %v", err)
+		log.Fatalf("Cannot create output file, error: %v", err)
 	}
-
 	output, err = os.Create(dcaFilename)
 	if err != nil {
 		log.Fatalf("Cannot create output file, error: %v", err)
@@ -267,8 +267,6 @@ func main() {
 
 	opusEncoder.SetBitrate(audioBitrate * 1000)
 
-	ytdlclient := ytdl.DefaultClient
-
 	// This goroutine manages the newly-added songs, whenever a new song is added it calls
 	// send() to stream it to discord, and then cleans the file for another song to be played.
 	// If there are any problems with the queue, most likely it's from this function alone.
@@ -284,7 +282,23 @@ func main() {
 				vid := queue[queueindex]
 				playingAudio = true
 
-				ytdlclient.Download(vid.Base, vid.Base.Formats[0], input)
+				format := &vid.Base.Formats[0]
+				minsize := vid.Base.Formats[0].ContentLength
+				for _, v := range vid.Base.Formats[1:] {
+					if v.ContentLength < minsize {
+						format = &v
+						minsize = v.ContentLength
+					}
+				}
+				rd, _, err := ytcl.GetStream(vid.Base, format)
+				if err != nil {
+					log.Fatalf("ytcl.GetStream: %s", err.Error())
+				}
+
+				_, err = io.Copy(input, rd)
+				if err != nil {
+					log.Fatalf("ioutil.ReadAll: %s", err.Error())
+				}
 				time.Sleep(time.Second)
 
 				send()
@@ -358,12 +372,8 @@ func replacestringwithtrackinfo(str string, track *videoInfo) string {
 		"{{title}}", base.Title,
 		"{{id}}", base.ID,
 		"{{description}}", base.Description,
-		"{{datepublished}}", base.DatePublished.Format("2006/01/02"),
-		"{{uploader}}", base.Uploader,
-		"{{song}}", base.Song,
-		"{{artist}}", base.Artist,
-		"{{album}}", base.Album,
-		"{{writers}}", base.Writers,
+		"{{publishdate}}", base.PublishDate.Format("2006/01/02"),
+		"{{author}}", base.Author,
 		"{{duration}}", duration,
 		"{{name}}", track.Name)
 
@@ -424,7 +434,7 @@ func cmdPlay(s *discordgo.Session, m *commandParameter) {
 				}
 			}
 
-			call := yt.Search.List("id").Q(urlstring).MaxResults(1).Type("video")
+			call := yt.Search.List([]string{"id"}).Q(urlstring).MaxResults(1).Type("video")
 
 			res, err := call.Do()
 			if err != nil {
@@ -438,7 +448,7 @@ func cmdPlay(s *discordgo.Session, m *commandParameter) {
 		}
 
 		if len(yturl) > 0 {
-			vid, err := ytdl.GetVideoInfo(yturl)
+			vid, err := ytcl.GetVideo(yturl)
 			if err == nil {
 
 				newvid := &videoInfo{
@@ -625,7 +635,7 @@ func cmdVolume(s *discordgo.Session, m *commandParameter) {
 	}
 
 	str := m.cmd.messages["volume"]
-	str = strings.Replace(str, "{{volume}}", fmt.Sprintf("%02d", int(volume*100)), 0)
+	str = strings.ReplaceAll(str, "{{volume}}", fmt.Sprintf("%02d", int(volume*100)))
 
 	s.ChannelMessageSend(m.ChannelID, str)
 }
