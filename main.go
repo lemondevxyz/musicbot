@@ -78,7 +78,9 @@ func init() {
 		&command{
 			alias:    []string{"skip", "sk"},
 			help:     "Skips the current song and plays the next song if there is one",
-			messages: map[string]string{},
+			messages: map[string]string{
+				"skip": "Skipped the last song",
+			},
 			callback: cmdSkip,
 		},
 
@@ -281,6 +283,7 @@ func main() {
 
 				vid := queue[queueindex]
 				playingAudio = true
+				// close
 
 				format := &vid.Base.Formats[0]
 				minsize := vid.Base.Formats[0].ContentLength
@@ -548,6 +551,10 @@ func cmdSkip(s *discordgo.Session, m *commandParameter) {
 		i := queueindex + 1
 		if i <= len(queue) {
 			setqueueindex(i)
+			
+			if len(m.cmd.messages["skip"]) > 0 {
+				s.ChannelMessageSend(m.ChannelID, m.cmd.messages["skip"])
+			}
 		}
 	}
 }
