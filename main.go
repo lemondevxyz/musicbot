@@ -232,6 +232,7 @@ func main() {
 	viper.SetDefault("botToken", "")
 	viper.SetDefault("youtubeKey", "")
 	viper.SetDefault("prefix", "")
+	viper.SetDefault("status", "")
 
 	var err error
 
@@ -310,6 +311,10 @@ func main() {
 	err = sesh.Open()
 	if err != nil {
 		log.Fatalf("An error occured with opening the websocket connecting, error: %v", err)
+	}
+	
+	if len(config.Status) > 0 {
+		fmt.Println(sesh.UpdateListeningStatus(config.Status))
 	}
 
 	client := &http.Client{
