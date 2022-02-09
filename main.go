@@ -1,9 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"math"
@@ -30,6 +30,8 @@ type commandParameter struct {
 	cmd   *command
 	Split []string
 }
+
+//
 
 type videoInfo struct {
 	Base *ytdl.Video
@@ -76,8 +78,8 @@ func init() {
 		},
 
 		&command{
-			alias:    []string{"skip", "sk"},
-			help:     "Skips the current song and plays the next song if there is one",
+			alias: []string{"skip", "sk"},
+			help:  "Skips the current song and plays the next song if there is one",
 			messages: map[string]string{
 				"skip": "Skipped the last song",
 			},
@@ -207,9 +209,6 @@ var queueindex = -1 // This is the original queue index
 var loop = loopOff
 var shuffle = false
 
-var input *os.File
-var output *os.File
-
 var sample = []string{
 	"https://www.youtube.com/watch?v=eCGV26aj-mM",
 	"https://www.youtube.com/watch?v=XbGs_qK2PQA",
@@ -248,19 +247,6 @@ func main() {
 		log.Fatalf("Unable to unmarshal config, error: %v", err)
 	}
 
-	input, err = os.Create(audioFilename)
-	if err != nil {
-		log.Fatalf("Cannot create output file, error: %v", err)
-	}
-	output, err = os.Create(dcaFilename)
-	if err != nil {
-		log.Fatalf("Cannot create output file, error: %v", err)
-	}
-
-	// Cleanup is used to truncate the files
-	cleanup()
-	defer cleanup()
-
 	// OpusEncoder is used to encode the Output file to discord's own DCA format
 	opusEncoder, err = opus.NewEncoder(audioFrameRate, audioChannels, opus.AppAudio)
 	if err != nil {
@@ -293,19 +279,17 @@ func main() {
 						minsize = v.ContentLength
 					}
 				}
-				rd, _, err := ytcl.GetStream(vid.Base, format)
+
+				dl, _, err := ytcl.GetStream(vid.Base, format)
 				if err != nil {
 					log.Fatalf("ytcl.GetStream: %s", err.Error())
 				}
 
-				_, err = io.Copy(input, rd)
-				if err != nil {
-					log.Fatalf("ioutil.ReadAll: %s", err.Error())
-				}
+				rd := bufio.NewReaderSize(dl, bufferSize)
 				time.Sleep(time.Second)
 
-				send()
-				cleanup()
+				send(rd)
+				dl.Close()
 			}
 
 			time.Sleep(time.Second)
@@ -347,15 +331,6 @@ func main() {
 	log.Println("Closed Session")
 }
 
-func cleanup() {
-
-	input.Truncate(0)
-	input.Seek(0, 0)
-
-	output.Truncate(0)
-	output.Seek(0, 0)
-
-}
 func setqueueindex(v int) {
 	if len(queue) >= v {
 		queueindex = v
@@ -551,7 +526,7 @@ func cmdSkip(s *discordgo.Session, m *commandParameter) {
 		i := queueindex + 1
 		if i <= len(queue) {
 			setqueueindex(i)
-			
+
 			if len(m.cmd.messages["skip"]) > 0 {
 				s.ChannelMessageSend(m.ChannelID, m.cmd.messages["skip"])
 			}

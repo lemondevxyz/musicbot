@@ -3,19 +3,20 @@ package main
 import (
 	"bufio"
 	"encoding/binary"
+	"io"
 	"log"
 	"math"
 	"math/rand"
 	"os/exec"
 	"strconv"
 	"sync"
-	"time"
 
 	"gopkg.in/hraban/opus.v2"
 )
 
 var (
-
+	// BufferSize is used when downloading the youtube video so that ffmpeg doesn't over-reach while transcoding. Currently set to 512 KB.
+	bufferSize = 1024 * 512
 	// AudioChannels sets the ops encoder channel value.
 	// Must be set to 1 for mono, 2 for stereo
 	audioChannels = 2
@@ -69,36 +70,15 @@ var (
 	playingAudio bool
 )
 
-func convert() error {
-
-	ff := exec.Command("ffmpeg", []string{
-		"-y",
-		"-i", audioFilename,
-		"-f", "s16le",
-		"-ar", strconv.Itoa(audioFrameRate),
-		"-ac", strconv.Itoa(audioChannels),
-		dcaFilename,
-	}...)
-
-	return ff.Run()
-}
-
 // send reads from the converted opus file, then sends it to the voice connection
-func send() {
-
-	err := convert()
-	if err != nil {
-		log.Printf("ffmpeg encountered an error: %v", err)
-		return
-	}
-
+func send(input io.Reader) {
 	qi := queueindex
 	defer func(qi int) {
 		if vc != nil {
 			vc.Speaking(false)
 		}
 
-		log.Println("ran defer")
+		//log.Println("ran defer")
 		playingAudio = false
 
 		// If the user didn't skip the song
@@ -108,7 +88,6 @@ func send() {
 			if shuffle == false && loop != loopSong {
 				// If the amount of songs exceeds the current song index, i.e
 				// amount of songs: 5, current song: 4, queueindex would become 5
-				log.Println(len(queue), queueindex)
 				if len(queue) > queueindex {
 					setqueueindex(queueindex + 1)
 				}
@@ -130,8 +109,6 @@ func send() {
 					arr = append(arr, i)
 				}
 
-				// Setting up the seed for unpredictable results
-				rand.Seed(time.Now().UnixNano())
 				// If there are more than 1 song in the array
 				if len(arr) > 1 {
 					// Set queue index to a random index that is equal to len(arr)-1
@@ -153,6 +130,31 @@ func send() {
 		vc.Speaking(true)
 	}
 
+	ff := exec.Command("ffmpeg", []string{
+		"-y",
+		"-i", "-",
+		"-f", "s16le",
+		"-ar", strconv.Itoa(audioFrameRate),
+		"-ac", strconv.Itoa(audioChannels),
+		"-",
+	}...)
+
+	ff.Stdin = input
+	pipe, err := ff.StdoutPipe()
+	defer pipe.Close()
+	defer func(ff *exec.Cmd) {
+		if ff.Process != nil {
+			ff.Process.Kill()
+		}
+	}(ff)
+	if err != nil {
+		log.Fatalf("ff.PipeStdout: %s", err.Error())
+	}
+	go ff.Start()
+	go ff.Wait()
+
+	output := bufio.NewReaderSize(pipe, bufferSize)
+
 	// Create a 16KB input buffer
 	filebuffer := bufio.NewReaderSize(output, 16384)
 
@@ -166,7 +168,7 @@ func send() {
 
 			buf := make([]int16, originalMaxBytes)
 
-			err = binary.Read(filebuffer, binary.LittleEndian, &buf)
+			err := binary.Read(filebuffer, binary.LittleEndian, &buf)
 			if err != nil {
 				// Okay! There's nothing left, time to quit.
 				break
@@ -187,5 +189,4 @@ func send() {
 		}
 	}
 
-	log.Println("end")
 }
