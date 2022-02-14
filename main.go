@@ -103,6 +103,7 @@ func init() {
 			messages: map[string]string{
 				"already_in": "I am already in a voice channel",
 				"no_channel": "You need to be in a voice channel",
+				"success":    "Successfully joined your voice channel",
 			},
 			callback: cmdJoin,
 		},
@@ -174,6 +175,8 @@ func init() {
 				"cmd":        "**{{name}}** *{{alias}}*\n{{help}}\n", // name is the first alias
 				"endalias":   "]",
 				"end":        "",
+				"success":    "Check your dms",
+				"error":      "I cannot DM you",
 			},
 			callback: cmdHelp,
 		},
@@ -575,7 +578,6 @@ func cmdJoin(s *discordgo.Session, m *commandParameter) {
 
 	if vc != nil {
 		s.ChannelMessageSend(m.ChannelID, m.cmd.messages["already_in"])
-
 	}
 
 	channel, err := s.State.Channel(m.ChannelID)
@@ -591,6 +593,9 @@ func cmdJoin(s *discordgo.Session, m *commandParameter) {
 	for _, vs := range guild.VoiceStates {
 		if vs.UserID == m.Author.ID {
 			vc, _ = s.ChannelVoiceJoin(vs.GuildID, vs.ChannelID, false, true)
+			if len(m.cmd.messages["success"]) > 0 {
+				s.ChannelMessageSend(m.ChannelID, m.cmd.messages["success"])
+			}
 			return
 		}
 	}
@@ -724,36 +729,44 @@ func cmdClear(s *discordgo.Session, m *commandParameter) {
 
 func cmdHelp(s *discordgo.Session, m *commandParameter) {
 
-	str := m.cmd.messages["start"]
-
-	for _, v := range commands {
-
-		name := v.alias[0]
-		name = strings.Title(name)
-
-		alias := m.cmd.messages["startalias"]
-		for k, val := range v.alias {
-			alias += val
-			if k+1 < len(v.alias) {
-				alias += ","
-			}
-		}
-		alias += m.cmd.messages["endalias"]
-
-		format := m.cmd.messages["cmd"]
-
-		format = strings.ReplaceAll(format, "{{alias}}", alias)
-		format = strings.ReplaceAll(format, "{{name}}", name)
-		format = strings.ReplaceAll(format, "{{help}}", v.help)
-
-		str += format
-	}
-
-	str += m.cmd.messages["end"]
-
 	chn, err := s.UserChannelCreate(m.Author.ID)
 	if err == nil {
-		s.ChannelMessageSend(chn.ID, str)
+		str := m.cmd.messages["start"]
+		for _, v := range commands {
+
+			name := v.alias[0]
+			name = strings.Title(name)
+
+			alias := m.cmd.messages["startalias"]
+			for k, val := range v.alias {
+				alias += val
+				if k+1 < len(v.alias) {
+					alias += ","
+				}
+			}
+			alias += m.cmd.messages["endalias"]
+
+			format := m.cmd.messages["cmd"]
+
+			format = strings.ReplaceAll(format, "{{alias}}", alias)
+			format = strings.ReplaceAll(format, "{{name}}", name)
+			format = strings.ReplaceAll(format, "{{help}}", v.help)
+
+			str += format
+		}
+
+		str += m.cmd.messages["end"]
+
+		_, err := s.ChannelMessageSend(chn.ID, str)
+		if err != nil {
+			s.ChannelMessageSend(m.ChannelID, m.cmd.messages["error"])
+			return
+		}
+		if len(m.cmd.messages["success"]) > 0 {
+			s.ChannelMessageSend(m.ChannelID, m.cmd.messages["success"])
+		}
+	} else {
+		s.ChannelMessageSend(m.ChannelID, m.cmd.messages["error"])
 	}
 }
 
