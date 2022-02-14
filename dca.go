@@ -2,17 +2,49 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
-	"log"
 	"math"
 	"math/rand"
 	"os/exec"
-	"strconv"
 	"sync"
+	"time"
 
 	"gopkg.in/hraban/opus.v2"
 )
+
+type ChannelReadWriter struct {
+	data io.ReadWriter
+	ch   chan struct{}
+}
+
+func NewCRW(rd int) *ChannelReadWriter {
+	if rd == 0 {
+		rd = bufferSize
+	}
+
+	buf := bytes.NewBuffer(nil)
+	return &ChannelReadWriter{data: bufio.NewReadWriter(bufio.NewReaderSize(buf, rd), bufio.NewWriterSize(buf, bufferSize))}
+}
+
+func (c *ChannelReadWriter) Write(b []byte) (int, error) {
+	n, err := c.data.Write(b)
+	if c.ch != nil {
+		fmt.Println("ch")
+		c.ch <- struct{}{}
+		fmt.Println("ch <-")
+	}
+
+	return n, err
+}
+
+func (c *ChannelReadWriter) Read(b []byte) (int, error) {
+	n, err := c.data.Read(b)
+
+	return n, err
+}
 
 var (
 	// BufferSize is used when downloading the youtube video so that ffmpeg doesn't over-reach while transcoding. Currently set to 512 KB.
@@ -130,33 +162,31 @@ func send(input io.Reader) {
 		vc.Speaking(true)
 	}
 
-	ff := exec.Command("ffmpeg", []string{
-		"-y",
-		"-i", "-",
-		"-f", "s16le",
-		"-ar", strconv.Itoa(audioFrameRate),
-		"-ac", strconv.Itoa(audioChannels),
-		"-",
-	}...)
+	decoder := bytes.NewBuffer(nil)
+
+	ff := exec.Command("ffmpeg", "-y", "-nostdin", "-i", "-", "-f", "s16le",
+		"-ar", fmt.Sprintf("%d", audioFrameRate),
+		"-ac", fmt.Sprintf("%d", audioChannels),
+		"-")
 
 	ff.Stdin = input
-	pipe, err := ff.StdoutPipe()
-	defer pipe.Close()
+	ff.Stdout = decoder
+
+	ff.Start()
+
+	time.Sleep(time.Second)
+
 	defer func(ff *exec.Cmd) {
 		if ff.Process != nil {
 			ff.Process.Kill()
 		}
 	}(ff)
-	if err != nil {
-		log.Fatalf("ff.PipeStdout: %s", err.Error())
-	}
-	go ff.Start()
-	go ff.Wait()
-
-	output := bufio.NewReaderSize(pipe, bufferSize)
-
-	// Create a 16KB input buffer
-	filebuffer := bufio.NewReaderSize(output, 16384)
+	stop := false
+	go func() {
+		err := ff.Wait()
+		stop = true
+		fmt.Println("done", err)
+	}()
 
 	for vc != nil {
 		if queueindex != qi {
@@ -168,9 +198,10 @@ func send(input io.Reader) {
 
 			buf := make([]int16, originalMaxBytes)
 
-			err := binary.Read(filebuffer, binary.LittleEndian, &buf)
+			err := binary.Read(decoder, binary.LittleEndian, &buf)
 			if err != nil {
 				// Okay! There's nothing left, time to quit.
+				fmt.Println("break")
 				break
 			}
 
@@ -182,11 +213,11 @@ func send(input io.Reader) {
 
 			num, err := opusEncoder.Encode(buf, opus)
 			if err == nil && num > 0 {
+				fmt.Println("sending")
 				vc.OpusSend <- opus[:num]
 			} else {
 				break
 			}
 		}
 	}
-
 }

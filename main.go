@@ -272,15 +272,18 @@ func main() {
 				playingAudio = true
 				// close
 
-				format := &vid.Base.Formats[0]
-				minsize := vid.Base.Formats[0].ContentLength
-				for _, v := range vid.Base.Formats[1:] {
-					if v.ContentLength < minsize {
+				var format *ytdl.Format
+				minsize := int64(0)
+				for _, v := range vid.Base.Formats.Type("audio") {
+					if format == nil || (format != nil && minsize > v.ContentLength) {
 						format = &v
+						fmt.Println("hi", format.MimeType, v.ContentLength)
 						minsize = v.ContentLength
 					}
 				}
 
+				fmt.Println(len(vid.Base.Formats), vid.Base.Formats[0].MimeType)
+				fmt.Println("last", format.MimeType)
 				dl, _, err := ytcl.GetStream(vid.Base, format)
 				if err != nil {
 					log.Fatalf("ytcl.GetStream: %s", err.Error())
@@ -312,7 +315,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("An error occured with opening the websocket connecting, error: %v", err)
 	}
-	
+
 	if len(config.Status) > 0 {
 		fmt.Println(sesh.UpdateListeningStatus(config.Status))
 	}
